@@ -90,4 +90,4 @@ go fmt ./...
 
 ## License
 
-MIT
+See [LICENSE](LICENSE)
