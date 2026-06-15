@@ -11,7 +11,7 @@ import (
 
 const (
 	Name      = "probe"
-	Version   = "0.3.0"
+	Version   = "0.4.0"
 	UserAgent = Name + "/" + Version
 )
 
@@ -50,6 +50,8 @@ type Config struct {
 	Retry          int
 	FailOnError    bool
 	InputFile      string
+	GitHub         string
+	GitHubDir      string
 	ShowHelp       bool
 	ShowVersion    bool
 
@@ -112,6 +114,8 @@ func Parse(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.FailOnError, "f", false, "Exit with error on HTTP 4xx/5xx")
 	fs.StringVar(&cfg.InputFile, "input-file", "", "Read URLs from file (one per line)")
 	fs.StringVar(&cfg.CookieJar, "cookie-jar", "", "Read/write cookie jar file")
+	fs.StringVar(&cfg.GitHub, "github", "", "Download GitHub repo as ZIP (owner/repo[@ref])")
+	fs.StringVar(&cfg.GitHubDir, "github-dir", "", "Extract --github repo into this directory")
 
 	fs.BoolVar(&cfg.ShowHelp, "h", false, "Show help")
 	fs.BoolVar(&cfg.ShowVersion, "V", false, "Show version")
@@ -163,6 +167,9 @@ func readURLList(path string) ([]string, error) {
 
 func (c *Config) validate() error {
 	if c.ShowHelp || c.ShowVersion {
+		return nil
+	}
+	if c.GitHub != "" {
 		return nil
 	}
 	if len(c.URLs) == 0 {
@@ -226,9 +233,16 @@ func PrintUsage(w io.Writer) {
 
 Usage:
   %s [options] <url> [url...]
+  %s --github owner/repo[@ref]
   %s [options] --input-file urls.txt
 
-Run %s -h and see README.md for a full flag guide.
+Features:
+  HTTP requests with methods, headers, and body (curl)
+  Auto-save binary responses to a file (wget)
+  GitHub repo ZIP download and extract (--github, no .git)
+  Verbose mode: request/response headers, size, timing (-v)
+
+See README.md for the full flag guide.
 
 `, Name, Version, Name, Name, Name)
 }

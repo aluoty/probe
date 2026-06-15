@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/aluoty/probe.git/internal/client"
 	"github.com/aluoty/probe.git/internal/config"
@@ -12,7 +13,7 @@ import (
 )
 
 // HandleResponse formats and writes the HTTP response according to config.
-func HandleResponse(cfg *config.Config, resp *http.Response) error {
+func HandleResponse(cfg *config.Config, resp *http.Response, elapsed time.Duration) error {
 	if err := client.SaveCookies(cfg, resp); err != nil {
 		return err
 	}
@@ -24,7 +25,15 @@ func HandleResponse(cfg *config.Config, resp *http.Response) error {
 	}
 
 	if cfg.Spider {
-		return handleSpider(cfg, resp)
+		err := handleSpider(cfg, resp)
+		logVerbose(cfg, resp, elapsed, -1, err)
+		return err
+	}
+
+	if cfg.FailOnError && isHTTPError(resp.StatusCode) {
+		err := fmt.Errorf("HTTP %s", resp.Status)
+		logVerbose(cfg, resp, elapsed, -1, err)
+		return err
 	}
 
 	dest, toFile, err := download.ResolveOutputPath(cfg, resp)
@@ -32,31 +41,75 @@ func HandleResponse(cfg *config.Config, resp *http.Response) error {
 		return err
 	}
 
-	if cfg.FailOnError && isHTTPError(resp.StatusCode) {
-		return fmt.Errorf("HTTP %s", resp.Status)
+	var peek []byte
+	if !toFile && cfg.Method != "HEAD" {
+		peek, err = download.PeekBodyDefault(resp)
+		if err != nil {
+			return fmt.Errorf("read response: %w", err)
+		}
+		if download.ShouldSaveBinary(resp, peek) {
+			name, err := download.RemoteFilename(cfg.URLs[0], resp)
+			if err != nil {
+				return err
+			}
+			dest = name
+			if cfg.DirPrefix != "" {
+				dest = download.JoinDir(cfg.DirPrefix, name)
+			}
+			toFile = true
+			if !cfg.Silent {
+				fmt.Fprintf(os.Stderr, "binary response, saving to %s\n", dest)
+			}
+		}
 	}
 
-	if toFile {
-		_, err := download.WriteToFile(cfg, resp, dest)
-		return err
-	}
+	var bodyBytes int64
+	var handleErr error
 
-	if cfg.IncludeHeaders {
+	switch {
+	case toFile:
+		bodyBytes, handleErr = download.WriteToFile(cfg, resp, dest)
+	case cfg.IncludeHeaders:
 		if err := WriteHeaders(os.Stdout, resp); err != nil {
 			return err
 		}
 		fmt.Fprintln(os.Stdout)
-	}
-
-	if cfg.Method != "HEAD" {
-		if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
-			return fmt.Errorf("write body: %w", err)
+		if cfg.Method != "HEAD" {
+			bodyBytes, handleErr = copyOut(os.Stdout, resp.Body)
 		}
-	} else if !cfg.IncludeHeaders && !cfg.Silent {
-		fmt.Println(resp.Status)
+	case cfg.Method != "HEAD":
+		bodyBytes, handleErr = copyOut(os.Stdout, resp.Body)
+	default:
+		if !cfg.Silent {
+			fmt.Println(resp.Status)
+		}
 	}
 
+	if handleErr != nil {
+		logVerbose(cfg, resp, elapsed, bodyBytes, handleErr)
+		return handleErr
+	}
+
+	logVerbose(cfg, resp, elapsed, bodyBytes, nil)
 	return nil
+}
+
+func copyOut(w io.Writer, r io.Reader) (int64, error) {
+	n, err := io.Copy(w, r)
+	if err != nil {
+		return n, fmt.Errorf("write body: %w", err)
+	}
+	return n, nil
+}
+
+func logVerbose(cfg *config.Config, resp *http.Response, elapsed time.Duration, bodyBytes int64, err error) {
+	if !cfg.Verbose {
+		return
+	}
+	client.LogResponseSummary(os.Stderr, resp, elapsed, bodyBytes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "* error: %v\n", err)
+	}
 }
 
 func dumpHeaders(path string, resp *http.Response) error {

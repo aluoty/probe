@@ -96,7 +96,7 @@ func Fetch(cfg *config.Config, body *RequestBody) (*http.Response, error) {
 	}
 
 	httpClient := &http.Client{
-		Timeout: cfg.Timeout,
+		Timeout:   cfg.Timeout,
 		Transport: buildTransport(cfg),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if !cfg.FollowRedirect {
@@ -109,7 +109,7 @@ func Fetch(cfg *config.Config, body *RequestBody) (*http.Response, error) {
 			if len(via) >= limit {
 				return fmt.Errorf("stopped after %d redirects", limit)
 			}
-			if cfg.Verbose && !cfg.Silent {
+			if cfg.Verbose {
 				fmt.Fprintf(os.Stderr, "-> %s\n", req.URL)
 			}
 			return nil
@@ -125,7 +125,7 @@ func Fetch(cfg *config.Config, body *RequestBody) (*http.Response, error) {
 	for attempt := 0; attempt < cfg.Retry+1; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(attempt) * 500 * time.Millisecond
-			if cfg.Verbose && !cfg.Silent {
+			if cfg.Verbose {
 				fmt.Fprintf(os.Stderr, "retry %d/%d after %s\n", attempt, cfg.Retry, backoff)
 			}
 			time.Sleep(backoff)
@@ -141,14 +141,8 @@ func Fetch(cfg *config.Config, body *RequestBody) (*http.Response, error) {
 			return nil, err
 		}
 
-		if cfg.Verbose && !cfg.Silent {
-			fmt.Fprintf(os.Stderr, "> %s %s\n", req.Method, req.URL)
-			for k, vals := range req.Header {
-				for _, v := range vals {
-					fmt.Fprintf(os.Stderr, "> %s: %s\n", k, v)
-				}
-			}
-			fmt.Fprintln(os.Stderr)
+		if cfg.Verbose {
+			LogVerboseRequest(cfg, req)
 		}
 
 		resp, err := httpClient.Do(req)
@@ -165,7 +159,7 @@ func Fetch(cfg *config.Config, body *RequestBody) (*http.Response, error) {
 func buildTransport(cfg *config.Config) *http.Transport {
 	dialer := &net.Dialer{Timeout: cfg.ConnectTimeout}
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy:       http.ProxyFromEnvironment,
 		DialContext: dialer.DialContext,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: cfg.Insecure,

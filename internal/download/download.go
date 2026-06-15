@@ -35,6 +35,11 @@ func ResolveOutputPath(cfg *config.Config, resp *http.Response) (string, bool, e
 	return name, true, nil
 }
 
+// JoinDir joins a directory prefix with a filename.
+func JoinDir(dir, name string) string {
+	return filepath.Join(dir, name)
+}
+
 // RemoteFilename derives a local filename from Content-Disposition or the URL path.
 func RemoteFilename(rawURL string, resp *http.Response) (string, error) {
 	if cd := resp.Header.Get("Content-Disposition"); cd != "" {

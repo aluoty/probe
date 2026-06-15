@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/aluoty/probe.git/internal/client"
 	"github.com/aluoty/probe.git/internal/config"
 	"github.com/aluoty/probe.git/internal/download"
+	"github.com/aluoty/probe.git/internal/github"
 	"github.com/aluoty/probe.git/internal/output"
 )
 
@@ -27,6 +29,13 @@ func run(args []string) int {
 	}
 	if cfg.ShowVersion {
 		fmt.Println(config.Name, config.Version)
+		return 0
+	}
+
+	if cfg.GitHub != "" {
+		if err := github.Download(cfg); err != nil {
+			return fail(cfg, err)
+		}
 		return 0
 	}
 
@@ -53,13 +62,14 @@ func fetchOne(cfg *config.Config) error {
 		return err
 	}
 
+	start := time.Now()
 	resp, err := client.Fetch(cfg, body)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	return output.HandleResponse(cfg, resp)
+	return output.HandleResponse(cfg, resp, time.Since(start))
 }
 
 func fail(cfg *config.Config, err error) int {
