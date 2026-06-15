@@ -30,30 +30,40 @@ func run(args []string) int {
 		return 0
 	}
 
-	body, err := client.LoadRequestBody(cfg)
+	exitCode := 0
+	for _, url := range cfg.URLs {
+		reqCfg := cfg.Clone(url)
+		if err := fetchOne(reqCfg); err != nil {
+			exitCode = fail(reqCfg, err)
+			if cfg.FailOnError {
+				return exitCode
+			}
+		}
+	}
+	return exitCode
+}
+
+func fetchOne(cfg *config.Config) error {
+	body, err := client.PrepareRequestBody(cfg)
 	if err != nil {
-		return fail(cfg, err)
+		return err
 	}
 
 	if err := download.PrepareResume(cfg); err != nil {
-		return fail(cfg, err)
+		return err
 	}
 
 	resp, err := client.Fetch(cfg, body)
 	if err != nil {
-		return fail(cfg, fmt.Errorf("request failed: %w", err))
+		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if err := output.HandleResponse(cfg, resp); err != nil {
-		return fail(cfg, err)
-	}
-
-	return 0
+	return output.HandleResponse(cfg, resp)
 }
 
 func fail(cfg *config.Config, err error) int {
-	if !cfg.Silent {
+	if !cfg.Silent || cfg.ShowErrors {
 		fmt.Fprintln(os.Stderr, "error:", err)
 	}
 	return 1

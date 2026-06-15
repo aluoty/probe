@@ -6,12 +6,23 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/aluoty/probe.git/internal/client"
 	"github.com/aluoty/probe.git/internal/config"
 	"github.com/aluoty/probe.git/internal/download"
 )
 
 // HandleResponse formats and writes the HTTP response according to config.
 func HandleResponse(cfg *config.Config, resp *http.Response) error {
+	if err := client.SaveCookies(cfg, resp); err != nil {
+		return err
+	}
+
+	if cfg.DumpHeaders != "" {
+		if err := dumpHeaders(cfg.DumpHeaders, resp); err != nil {
+			return err
+		}
+	}
+
 	if cfg.Spider {
 		return handleSpider(cfg, resp)
 	}
@@ -48,12 +59,27 @@ func HandleResponse(cfg *config.Config, resp *http.Response) error {
 	return nil
 }
 
+func dumpHeaders(path string, resp *http.Response) error {
+	if path == "-" {
+		return WriteHeaders(os.Stdout, resp)
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create header file: %w", err)
+	}
+	defer f.Close()
+
+	return WriteHeaders(f, resp)
+}
+
 func handleSpider(cfg *config.Config, resp *http.Response) error {
 	if !cfg.Silent {
+		url := cfg.URLs[0]
 		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-			fmt.Fprintf(os.Stderr, "URL exists: %s (%s)\n", cfg.URL, resp.Status)
+			fmt.Fprintf(os.Stderr, "URL exists: %s (%s)\n", url, resp.Status)
 		} else {
-			fmt.Fprintf(os.Stderr, "URL missing or error: %s (%s)\n", cfg.URL, resp.Status)
+			fmt.Fprintf(os.Stderr, "URL missing or error: %s (%s)\n", url, resp.Status)
 		}
 	}
 	if cfg.FailOnError && isHTTPError(resp.StatusCode) {

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/aluoty/probe.git/internal/config"
@@ -14,17 +15,24 @@ import (
 
 // ResolveOutputPath picks the destination file from -o, -O, or stdout.
 func ResolveOutputPath(cfg *config.Config, resp *http.Response) (string, bool, error) {
-	if cfg.Output != "" {
-		return cfg.Output, true, nil
-	}
-	if cfg.RemoteName {
-		name, err := RemoteFilename(cfg.URL, resp)
+	var name string
+	switch {
+	case cfg.Output != "":
+		name = cfg.Output
+	case cfg.RemoteName:
+		var err error
+		name, err = RemoteFilename(cfg.URLs[0], resp)
 		if err != nil {
 			return "", false, err
 		}
-		return name, true, nil
+	default:
+		return "", false, nil
 	}
-	return "", false, nil
+
+	if cfg.DirPrefix != "" {
+		name = filepath.Join(cfg.DirPrefix, name)
+	}
+	return name, true, nil
 }
 
 // RemoteFilename derives a local filename from Content-Disposition or the URL path.
@@ -70,11 +78,14 @@ func PrepareResume(cfg *config.Config) error {
 
 	dest := cfg.Output
 	if dest == "" && cfg.RemoteName {
-		name, err := remoteFilenameFromURL(cfg.URL)
+		name, err := remoteFilenameFromURL(cfg.URLs[0])
 		if err != nil {
 			return err
 		}
 		dest = name
+	}
+	if cfg.DirPrefix != "" {
+		dest = filepath.Join(cfg.DirPrefix, dest)
 	}
 	if dest == "" {
 		return fmt.Errorf("-c requires -o or -O")
@@ -100,6 +111,22 @@ func PrepareResume(cfg *config.Config) error {
 
 // WriteToFile saves the response body to disk, optionally resuming.
 func WriteToFile(cfg *config.Config, resp *http.Response, dest string) (int64, error) {
+	if cfg.NoClobber {
+		if _, err := os.Stat(dest); err == nil {
+			if !cfg.Silent {
+				fmt.Fprintf(os.Stderr, "skipping existing file %s\n", dest)
+			}
+			io.Copy(io.Discard, resp.Body)
+			return 0, nil
+		}
+	}
+
+	if dir := filepath.Dir(dest); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return 0, fmt.Errorf("create directory: %w", err)
+		}
+	}
+
 	if cfg.Continue && cfg.ResumeOffset > 0 && dest == cfg.ResumeFile {
 		if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
 			return 0, fmt.Errorf("server does not support resume (status %s)", resp.Status)

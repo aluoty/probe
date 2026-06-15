@@ -1,9 +1,13 @@
 package client
 
 import (
+	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -11,18 +15,99 @@ import (
 	"github.com/aluoty/probe.git/internal/config"
 )
 
-const maxRedirects = 10
+// RequestBody holds the payload and any query string mutation from -G.
+type RequestBody struct {
+	Bytes []byte
+	Query string
+}
+
+// PrepareRequestBody resolves upload/data flags into bytes or a query string.
+func PrepareRequestBody(cfg *config.Config) (*RequestBody, error) {
+	if cfg.UploadFile != "" {
+		data, err := readAtRef(cfg.UploadFile)
+		if err != nil {
+			return nil, err
+		}
+		return &RequestBody{Bytes: data}, nil
+	}
+
+	if cfg.Data == "" {
+		return &RequestBody{}, nil
+	}
+
+	if cfg.UseGET {
+		query, err := dataToQuery(cfg.Data)
+		if err != nil {
+			return nil, err
+		}
+		return &RequestBody{Query: query}, nil
+	}
+
+	data, err := readAtRef(cfg.Data)
+	if err != nil {
+		return nil, err
+	}
+	return &RequestBody{Bytes: data}, nil
+}
+
+func readAtRef(ref string) ([]byte, error) {
+	if strings.HasPrefix(ref, "@") {
+		src := strings.TrimPrefix(ref, "@")
+		if src == "-" {
+			content, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				return nil, fmt.Errorf("read stdin: %w", err)
+			}
+			return content, nil
+		}
+		content, err := os.ReadFile(src)
+		if err != nil {
+			return nil, fmt.Errorf("read file %q: %w", src, err)
+		}
+		return content, nil
+	}
+	return []byte(ref), nil
+}
+
+func dataToQuery(data string) (string, error) {
+	raw, err := readAtRef(data)
+	if err != nil {
+		return "", err
+	}
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return "", nil
+	}
+	if strings.Contains(text, "=") {
+		return text, nil
+	}
+	return url.QueryEscape(text), nil
+}
 
 // Fetch performs an HTTP request with retries and optional redirect following.
-func Fetch(cfg *config.Config, body io.Reader) (*http.Response, error) {
+func Fetch(cfg *config.Config, body *RequestBody) (*http.Response, error) {
+	targetURL := cfg.URLs[0]
+	if body != nil && body.Query != "" {
+		sep := "?"
+		if strings.Contains(targetURL, "?") {
+			sep = "&"
+		}
+		targetURL += sep + body.Query
+	}
+
 	httpClient := &http.Client{
 		Timeout: cfg.Timeout,
+		Transport: buildTransport(cfg),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if !cfg.FollowRedirect {
 				return http.ErrUseLastResponse
 			}
-			if len(via) >= maxRedirects {
-				return fmt.Errorf("stopped after %d redirects", maxRedirects)
+			limit := cfg.MaxRedirects
+			if limit <= 0 {
+				limit = 10
+			}
+			if len(via) >= limit {
+				return fmt.Errorf("stopped after %d redirects", limit)
 			}
 			if cfg.Verbose && !cfg.Silent {
 				fmt.Fprintf(os.Stderr, "-> %s\n", req.URL)
@@ -31,10 +116,13 @@ func Fetch(cfg *config.Config, body io.Reader) (*http.Response, error) {
 		},
 	}
 
-	var lastErr error
-	attempts := cfg.Retry + 1
+	var payload []byte
+	if body != nil {
+		payload = body.Bytes
+	}
 
-	for attempt := 0; attempt < attempts; attempt++ {
+	var lastErr error
+	for attempt := 0; attempt < cfg.Retry+1; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(attempt) * 500 * time.Millisecond
 			if cfg.Verbose && !cfg.Silent {
@@ -43,7 +131,12 @@ func Fetch(cfg *config.Config, body io.Reader) (*http.Response, error) {
 			time.Sleep(backoff)
 		}
 
-		req, err := buildRequest(cfg, body)
+		var reader io.Reader
+		if len(payload) > 0 {
+			reader = bytes.NewReader(payload)
+		}
+
+		req, err := buildRequest(cfg, targetURL, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -69,13 +162,36 @@ func Fetch(cfg *config.Config, body io.Reader) (*http.Response, error) {
 	return nil, lastErr
 }
 
-func buildRequest(cfg *config.Config, body io.Reader) (*http.Request, error) {
-	req, err := http.NewRequest(cfg.Method, cfg.URL, body)
+func buildTransport(cfg *config.Config) *http.Transport {
+	dialer := &net.Dialer{Timeout: cfg.ConnectTimeout}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: dialer.DialContext,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: cfg.Insecure,
+		},
+	}
+
+	if cfg.Proxy != "" {
+		proxyURL, err := url.Parse(cfg.Proxy)
+		if err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+
+	return transport
+}
+
+func buildRequest(cfg *config.Config, targetURL string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(cfg.Method, targetURL, body)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
 	req.Header.Set("User-Agent", cfg.UserAgent)
+	if cfg.Referer != "" {
+		req.Header.Set("Referer", cfg.Referer)
+	}
 
 	for _, h := range cfg.Headers {
 		key, val, ok := strings.Cut(h, ":")
@@ -83,6 +199,12 @@ func buildRequest(cfg *config.Config, body io.Reader) (*http.Request, error) {
 			return nil, fmt.Errorf("invalid header %q (expected Key: Value)", h)
 		}
 		req.Header.Set(strings.TrimSpace(key), strings.TrimSpace(val))
+	}
+
+	if cookie, err := loadCookies(cfg); err != nil {
+		return nil, err
+	} else if cookie != "" {
+		req.Header.Set("Cookie", cookie)
 	}
 
 	if cfg.BasicAuth != "" {
@@ -96,28 +218,17 @@ func buildRequest(cfg *config.Config, body io.Reader) (*http.Request, error) {
 	return req, nil
 }
 
-// LoadRequestBody resolves -d data, including @file and @- stdin references.
-func LoadRequestBody(cfg *config.Config) (io.Reader, error) {
-	if cfg.Data == "" {
-		return nil, nil
+func loadCookies(cfg *config.Config) (string, error) {
+	if cfg.Cookie == "" {
+		return "", nil
 	}
-
-	data := cfg.Data
-	if strings.HasPrefix(data, "@") {
-		ref := strings.TrimPrefix(data, "@")
-		if ref == "-" {
-			content, err := io.ReadAll(os.Stdin)
-			if err != nil {
-				return nil, fmt.Errorf("read stdin: %w", err)
-			}
-			return strings.NewReader(string(content)), nil
-		}
-		content, err := os.ReadFile(ref)
+	if strings.HasPrefix(cfg.Cookie, "@") {
+		path := strings.TrimPrefix(cfg.Cookie, "@")
+		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("read data file: %w", err)
+			return "", fmt.Errorf("read cookies: %w", err)
 		}
-		return strings.NewReader(string(content)), nil
+		return strings.TrimSpace(string(data)), nil
 	}
-
-	return strings.NewReader(data), nil
+	return cfg.Cookie, nil
 }
